@@ -72,34 +72,35 @@ async def websocket_endpoint(ws: WebSocket):
 
             async def receive_from_gemini():
                 """Receive audio/text from Gemini and forward to browser."""
-                async for message in session.receive():
-                    server = getattr(message, "server_content", None)
-                    if not server:
-                        continue
+                while True:
+                    async for message in session.receive():
+                        server = getattr(message, "server_content", None)
+                        if not server:
+                            continue
 
-                    if server.model_turn:
-                        for part in server.model_turn.parts:
-                            # Audio chunk -> send as base64 to browser
-                            if hasattr(part, "inline_data") and part.inline_data:
-                                audio_b64 = base64.b64encode(part.inline_data.data).decode("utf-8")
-                                await ws.send_json({
-                                    "type": "audio",
-                                    "data": audio_b64,
-                                })
+                        if server.model_turn:
+                            for part in server.model_turn.parts:
+                                # Audio chunk -> send as base64 to browser
+                                if hasattr(part, "inline_data") and part.inline_data:
+                                    audio_b64 = base64.b64encode(part.inline_data.data).decode("utf-8")
+                                    await ws.send_json({
+                                        "type": "audio",
+                                        "data": audio_b64,
+                                    })
 
-                            # Text transcript
-                            if hasattr(part, "text") and part.text:
-                                await ws.send_json({
-                                    "type": "transcript",
-                                    "text": part.text,
-                                })
+                                # Text transcript
+                                if hasattr(part, "text") and part.text:
+                                    await ws.send_json({
+                                        "type": "transcript",
+                                        "text": part.text,
+                                    })
 
-                    if server.turn_complete:
-                        await ws.send_json({"type": "turn_complete"})
-                        print("[GEMINI] Turn complete")
+                        if server.turn_complete:
+                            await ws.send_json({"type": "turn_complete"})
+                            print("[GEMINI] Turn complete")
 
-                    if server.interrupted:
-                        await ws.send_json({"type": "interrupted"})
+                        if server.interrupted:
+                            await ws.send_json({"type": "interrupted"})
 
             async def receive_from_browser():
                 """Receive text/images from browser and forward to Gemini."""

@@ -56,11 +56,14 @@ export default function App() {
   const [cameraActive, setCameraActive] = useState(false);
   const [lastFrame, setLastFrame] = useState(null);
 
+  const [listening, setListening] = useState(false);
+
   const wsRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const recognitionRef = useRef(null);
 
   // Auto-scroll chat
   useEffect(() => {
@@ -165,6 +168,99 @@ export default function App() {
     setLastFrame(dataUrl);
     return base64;
   }, []);
+
+  // Speech recognition toggle
+  const toggleListening = useCallback(() => {
+    console.log("[MIC] toggleListening called, listening =", listening);
+
+    if (listening) {
+      recognitionRef.current?.stop();
+      return;
+    }
+
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert("Speech recognition is not supported in this browser. Try Chrome or Edge.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onstart = () => {
+      setListening(true);
+      if (coachSpeaking) {
+        stopAudioPlayback();
+        setCoachSpeaking(false);
+      }
+    };
+
+    recognition.onresult = (event) => {
+      let transcript = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        transcript += event.results[i][0].transcript;
+      }
+      setInput(transcript);
+
+      if (event.results[event.results.length - 1].isFinal) {
+        const text = transcript.trim();
+        if (!text || !wsRef.current) return;
+
+        setInput("");
+
+        if (coachSpeaking) {
+          stopAudioPlayback();
+          setCoachSpeaking(false);
+        }
+
+        let frame = null;
+        if (cameraActive) {
+          frame = captureFrame();
+        }
+
+        setMessages((prev) => [
+          ...prev,
+          { role: "user", text, image: frame ? lastFrame : null },
+        ]);
+
+        if (frame) {
+          wsRef.current.send(
+            JSON.stringify({
+              type: "text_with_image",
+              text,
+              image: frame,
+              mime_type: "image/jpeg",
+            })
+          );
+        } else {
+          wsRef.current.send(JSON.stringify({ type: "text", text }));
+        }
+      }
+    };
+
+    recognition.onend = () => setListening(false);
+
+    recognition.onerror = (e) => {
+      console.error("[MIC] Error:", e.error);
+      if (e.error === "not-allowed") {
+        alert("Microphone permission denied. Please allow mic access and try again.");
+      } else if (e.error === "network") {
+        alert("Speech recognition network error. Check your internet connection.");
+      }
+      setListening(false);
+    };
+
+    recognitionRef.current = recognition;
+    try {
+      recognition.start();
+    } catch (err) {
+      console.error("[MIC] Failed to start:", err);
+      setListening(false);
+    }
+  }, [listening, coachSpeaking, cameraActive, captureFrame, lastFrame]);
 
   // Send message
   const sendMessage = useCallback(() => {
@@ -300,13 +396,22 @@ export default function App() {
           </div>
 
           <div className="input-area">
+            <button
+              className={`mic-btn ${listening ? "active" : ""}`}
+              onClick={toggleListening}
+              disabled={!connected}
+            >
+              {listening ? "🔴" : "🎙️"}
+            </button>
             <input
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={
-                connected
+                listening
+                  ? "Listening..."
+                  : connected
                   ? "Ask Coach T about tactics..."
                   : "Connecting..."
               }
