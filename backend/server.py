@@ -123,15 +123,15 @@ async def websocket_endpoint(ws: WebSocket):
                         img_mime = data.get("mime_type", "image/jpeg")
                         print(f"[USER] {text} (with image, {len(img_b64)} chars)")
 
-                        # Send image as realtime input first
-                        img_bytes = base64.b64decode(img_b64)
-                        await session.send_realtime_input(
-                            video={"data": img_bytes, "mime_type": img_mime}
-                        )
-
-                        # Then send the text question
+                        # Send image and text together in one turn
                         await session.send_client_content(
-                            turns={"role": "user", "parts": [{"text": text}]},
+                            turns={
+                                "role": "user",
+                                "parts": [
+                                    {"inline_data": {"mime_type": img_mime, "data": img_b64}},
+                                    {"text": text},
+                                ],
+                            },
                             turn_complete=True,
                         )
 
