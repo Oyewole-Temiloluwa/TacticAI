@@ -1,0 +1,8 @@
+cd C:\Users\hp\Documents\TacticAI\frontend
+npm run build
+cd ..
+xcopy frontend\dist backend\static\ /E /I /Y
+
+
+cd C:\Users\hp\Documents\TacticAI\backend
+gcloud run deploy tacticai --source . --allow-unauthenticated --set-env-vars="GOOGLE_API_KEY=AIzaSyALQ0lJXKxk38A0aoiQIv90KRQRvy4R_O0" --port=8080 --region=us-central1

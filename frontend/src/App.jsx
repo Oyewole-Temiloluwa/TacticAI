@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import "./App.css";
 
-const WS_URL = "ws://localhost:8000/ws";
+const WS_URL = window.location.hostname === "localhost"
+  ? "ws://localhost:8000/ws"
+  : `wss://${window.location.hostname}/ws`;
 
 // Audio playback context
 let audioCtx = null;
@@ -64,6 +66,27 @@ export default function App() {
   const streamRef = useRef(null);
   const messagesEndRef = useRef(null);
   const recognitionRef = useRef(null);
+  const frameIntervalRef = useRef(null);
+
+  // Continuous frame streaming
+  useEffect(() => {
+    if (cameraActive && connected) {
+      frameIntervalRef.current = setInterval(() => {
+        if (!videoRef.current || !canvasRef.current || !wsRef.current) return;
+        const canvas = canvasRef.current;
+        canvas.width = 640;
+        canvas.height = 480;
+        canvas.getContext("2d").drawImage(videoRef.current, 0, 0, 640, 480);
+        const base64 = canvas.toDataURL("image/jpeg", 0.5).split(",")[1];
+        wsRef.current.send(
+          JSON.stringify({ type: "video_frame", image: base64, mime_type: "image/jpeg" })
+        );
+      }, 3000);
+    } else {
+      clearInterval(frameIntervalRef.current);
+    }
+    return () => clearInterval(frameIntervalRef.current);
+  }, [cameraActive, connected]);
 
   // Auto-scroll chat
   useEffect(() => {
@@ -186,7 +209,7 @@ export default function App() {
     }
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = false;
+    recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = "en-US";
 
@@ -210,6 +233,7 @@ export default function App() {
         if (!text || !wsRef.current) return;
 
         setInput("");
+        recognition.stop();
 
         if (coachSpeaking) {
           stopAudioPlayback();
@@ -319,7 +343,8 @@ export default function App() {
         </div>
         <div className="header-right">
           <span className={`status ${connected ? "online" : "offline"}`}>
-            {connected ? "● Connected" : "● Disconnected"}
+            <span className="status-dot" />
+            {connected ? "Connected" : "Disconnected"}
           </span>
         </div>
       </header>
@@ -327,6 +352,9 @@ export default function App() {
       <div className="main">
         {/* Video panel */}
         <div className="video-panel">
+          {cameraActive && connected && (
+            <div className="streaming-badge">LIVE</div>
+          )}
           <video
             ref={videoRef}
             autoPlay
@@ -336,8 +364,8 @@ export default function App() {
           />
           {!cameraActive && (
             <div className="camera-placeholder">
-              <p>📷 Camera off</p>
-              <p>Enable camera to let Coach T see the match</p>
+              <div className="camera-placeholder-icon">📷</div>
+              <p>Enable camera to let Coach T watch the match live</p>
             </div>
           )}
           <canvas ref={canvasRef} style={{ display: "none" }} />
@@ -354,18 +382,20 @@ export default function App() {
           <div className="messages">
             {messages.length === 0 && (
               <div className="welcome">
-                <h2>👋 Hey! I'm Coach T.</h2>
-                <p>Ask me anything about football tactics.</p>
-                <p>Turn on the camera to show me a match!</p>
+                <div className="welcome-icon">🏆</div>
+                <h2>Coach T</h2>
+                <p className="welcome-desc">
+                  Your AI football tactical analyst. Ask about formations, pressing triggers, or point the camera at a match.
+                </p>
                 <div className="suggestions">
                   <button onClick={() => setInput("What formation beats a 4-3-3?")}>
-                    What beats a 4-3-3?
+                    ⚽ What beats a 4-3-3?
                   </button>
                   <button onClick={() => setInput("Explain gegenpressing to me")}>
-                    Explain gegenpressing
+                    🔄 Explain gegenpressing
                   </button>
                   <button onClick={() => setInput("How do I break a low block?")}>
-                    Breaking a low block
+                    🎯 Breaking a low block
                   </button>
                 </div>
               </div>
@@ -373,27 +403,42 @@ export default function App() {
 
             {messages.map((msg, i) => (
               <div key={i} className={`message ${msg.role}`}>
-                <div className="message-header">
-                  {msg.role === "coach" ? "🏆 Coach T" : "You"}
+                <div className="message-avatar">
+                  {msg.role === "coach" ? "T" : "U"}
                 </div>
-                {msg.image && (
-                  <img src={msg.image} alt="Match frame" className="msg-image" />
-                )}
-                <div className="message-text">{msg.text}</div>
+                <div className="message-content">
+                  {msg.image && (
+                    <img src={msg.image} alt="Match frame" className="msg-image" />
+                  )}
+                  <div className="message-bubble">{msg.text}</div>
+                </div>
               </div>
             ))}
 
             {coachSpeaking && (
-              <div className="message coach speaking">
-                <div className="message-header">🏆 Coach T</div>
-                <div className="speaking-indicator">
-                  <span></span><span></span><span></span>
+              <div className="message coach">
+                <div className="message-avatar">T</div>
+                <div className="message-content">
+                  <div className="message-bubble speaking-bubble">
+                    <div className="speaking-indicator">
+                      <span></span><span></span><span></span>
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
 
             <div ref={messagesEndRef} />
           </div>
+
+          {coachSpeaking && (
+            <div className="coach-speaking-bar">
+              <div className="speaking-waves">
+                <span /><span /><span /><span /><span />
+              </div>
+              Coach T is speaking…
+            </div>
+          )}
 
           <div className="input-area">
             <button
@@ -403,21 +448,27 @@ export default function App() {
             >
               {listening ? "🔴" : "🎙️"}
             </button>
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={
-                listening
-                  ? "Listening..."
-                  : connected
-                  ? "Ask Coach T about tactics..."
-                  : "Connecting..."
-              }
-              disabled={!connected}
-            />
-            <button onClick={sendMessage} disabled={!connected || !input.trim()}>
+            <div className={`input-wrap ${listening ? "listening" : ""}`}>
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={
+                  listening
+                    ? "Listening…"
+                    : connected
+                    ? "Ask Coach T about tactics…"
+                    : "Connecting…"
+                }
+                disabled={!connected}
+              />
+            </div>
+            <button
+              className="send-btn"
+              onClick={sendMessage}
+              disabled={!connected || !input.trim()}
+            >
               Send
             </button>
           </div>

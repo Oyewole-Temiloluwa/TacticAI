@@ -1,3 +1,5 @@
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 import asyncio
 import os
 import json
@@ -47,6 +49,7 @@ WHAT YOU DO NOT DO:
 - Never give long monologues. Short, sharp analysis.
 - Never make up specific player names unless the user mentions them.
 - Never break character. You ARE Coach T, always.
+- Never use markdown formatting. No bold, no headers, no bullet points, no asterisks. Speak in plain, natural sentences as if talking out loud.
 """
 
 CONFIG = {
@@ -69,6 +72,7 @@ async def websocket_endpoint(ws: WebSocket):
         async with client.aio.live.connect(model=MODEL, config=CONFIG) as session:
             print("[GEMINI] Connected to Live API")
             await ws.send_json({"type": "connected"})
+            video_frame_count = [0]
 
             async def receive_from_gemini():
                 """Receive audio/text from Gemini and forward to browser."""
@@ -143,6 +147,17 @@ async def websocket_endpoint(ws: WebSocket):
                             media_chunks=[{"data": base64.b64decode(img_data), "mime_type": img_mime}]
                         )
 
+                    elif msg_type == "video_frame":
+                        img_b64 = data.get("image", "")
+                        img_mime = data.get("mime_type", "image/jpeg")
+                        img_bytes = base64.b64decode(img_b64)
+                        await session.send_realtime_input(
+                            video={"data": img_bytes, "mime_type": img_mime}
+                        )
+                        video_frame_count[0] += 1
+                        if video_frame_count[0] % 10 == 0:
+                            print(f"[VIDEO] {video_frame_count[0]} frames sent")
+
             await asyncio.gather(
                 receive_from_gemini(),
                 receive_from_browser(),
@@ -157,6 +172,12 @@ async def websocket_endpoint(ws: WebSocket):
         except:
             pass
 
+# Serve frontend static files
+app.mount("/assets", StaticFiles(directory="static/assets"), name="assets")
+
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    return FileResponse("static/index.html")
 
 if __name__ == "__main__":
     import uvicorn
