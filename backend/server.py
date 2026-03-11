@@ -11,6 +11,9 @@ from google import genai
 
 load_dotenv()
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+
 app = FastAPI(title="TacticAI Backend")
 
 app.add_middleware(
@@ -21,7 +24,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+client = genai.Client(
+    api_key=os.getenv("GOOGLE_API_KEY"),
+    http_options={"api_version": "v1alpha"},
+)
 
 MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 
@@ -44,12 +50,14 @@ CONTEXT AWARENESS:
 - Track the flow of conversation. Remember what was discussed.
 - Build on previous observations.
 - If someone shares score or time info, factor it into tactical advice.
+- You will receive messages prefixed with [MATCH COMMENTARY]: — these are live transcriptions of the TV broadcast commentary. Absorb them silently as background context. Do NOT respond to them or acknowledge them. Only use them to enrich your answers when the user actually asks you something.
 
 WHAT YOU DO NOT DO:
 - Never give long monologues. Short, sharp analysis.
 - Never make up specific player names unless the user mentions them.
 - Never break character. You ARE Coach T, always.
 - Never use markdown formatting. No bold, no headers, no bullet points, no asterisks. Speak in plain, natural sentences as if talking out loud.
+- Never respond to or repeat back [MATCH COMMENTARY] messages. They are silent context only.
 """
 
 CONFIG = {
@@ -147,6 +155,32 @@ async def websocket_endpoint(ws: WebSocket):
                             media_chunks=[{"data": base64.b64decode(img_data), "mime_type": img_mime}]
                         )
 
+                    elif msg_type == "commentary_chunk":
+                        audio_b64 = data.get("data", "")
+                        mime_type = data.get("mime_type", "audio/webm")
+                        if not audio_b64:
+                            continue
+                        try:
+                            response = await asyncio.to_thread(
+                                client.models.generate_content,
+                                model="gemini-2.0-flash",
+                                contents=[{
+                                    "parts": [
+                                        {"inline_data": {"mime_type": mime_type, "data": audio_b64}},
+                                        {"text": "Transcribe the speech in this audio exactly. Return only the spoken words. If there is no speech, return nothing."},
+                                    ]
+                                }],
+                            )
+                            transcript = (response.text or "").strip()
+                            if transcript:
+                                await session.send_client_content(
+                                    turns={"role": "user", "parts": [{"text": f"[MATCH COMMENTARY]: {transcript}"}]},
+                                    turn_complete=False,
+                                )
+                                print(f"[COMMENTARY] {transcript[:80]}")
+                        except Exception as e:
+                            print(f"[COMMENTARY ERROR] {e}")
+
                     elif msg_type == "video_frame":
                         img_b64 = data.get("image", "")
                         img_mime = data.get("mime_type", "image/jpeg")
@@ -173,11 +207,11 @@ async def websocket_endpoint(ws: WebSocket):
             pass
 
 # Serve frontend static files
-app.mount("/assets", StaticFiles(directory="static/assets"), name="assets")
+app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_DIR, "assets")), name="assets")
 
 @app.get("/{full_path:path}")
 async def serve_frontend(full_path: str):
-    return FileResponse("static/index.html")
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 if __name__ == "__main__":
     import uvicorn

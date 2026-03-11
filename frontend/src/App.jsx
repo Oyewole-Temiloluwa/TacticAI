@@ -1,18 +1,17 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import "./App.css";
 
-const WS_URL = window.location.hostname === "localhost"
-  ? "ws://localhost:8000/ws"
-  : `wss://${window.location.hostname}/ws`;
+const WS_URL =
+  window.location.hostname === "localhost"
+    ? "ws://localhost:8000/ws"
+    : `wss://${window.location.hostname}/ws`;
 
-// Audio playback context
+// ── Audio engine ──────────────────────────────────────────────────────────────
 let audioCtx = null;
 let nextStartTime = 0;
 
 function getAudioCtx() {
-  if (!audioCtx) {
-    audioCtx = new AudioContext({ sampleRate: 24000 });
-  }
+  if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 24000 });
   return audioCtx;
 }
 
@@ -21,21 +20,15 @@ function playAudioChunk(base64Data) {
   const raw = atob(base64Data);
   const bytes = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-
-  // Convert 16-bit PCM to Float32
   const samples = new Float32Array(bytes.length / 2);
   const view = new DataView(bytes.buffer);
-  for (let i = 0; i < samples.length; i++) {
+  for (let i = 0; i < samples.length; i++)
     samples[i] = view.getInt16(i * 2, true) / 32768;
-  }
-
   const buffer = ctx.createBuffer(1, samples.length, 24000);
   buffer.getChannelData(0).set(samples);
-
   const source = ctx.createBufferSource();
   source.buffer = buffer;
   source.connect(ctx.destination);
-
   const now = ctx.currentTime;
   if (nextStartTime < now) nextStartTime = now;
   source.start(nextStartTime);
@@ -44,31 +37,64 @@ function playAudioChunk(base64Data) {
 
 function stopAudioPlayback() {
   nextStartTime = 0;
-  if (audioCtx) {
-    audioCtx.close();
-    audioCtx = null;
-  }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
 }
 
+// ── Component ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [connected, setConnected] = useState(false);
   const [coachSpeaking, setCoachSpeaking] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
   const [lastFrame, setLastFrame] = useState(null);
-
   const [listening, setListening] = useState(false);
+  const [commentaryActive, setCommentaryActive] = useState(false);
+  const [commentaryDevices, setCommentaryDevices] = useState([]);
+  const [selectedCommentaryDevice, setSelectedCommentaryDevice] = useState("");
+  const [awaitingPrompt, setAwaitingPrompt] = useState(false);
 
   const wsRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
-  const messagesEndRef = useRef(null);
   const recognitionRef = useRef(null);
   const frameIntervalRef = useRef(null);
+  const commentaryStreamRef = useRef(null);
+  const commentaryRecorderRef = useRef(null);
+  const wakeWordRef = useRef(null);
+  // Mirror refs for closures
+  const coachSpeakingRef = useRef(false);
+  const commentaryActiveRef = useRef(false);
+  const awaitingPromptRef = useRef(false);
+  const cameraActiveRef = useRef(false);
+  const lastFrameRef = useRef(null);
+  const connectedRef = useRef(false);
 
-  // Continuous frame streaming
+  useEffect(() => { coachSpeakingRef.current = coachSpeaking; }, [coachSpeaking]);
+  useEffect(() => { cameraActiveRef.current = cameraActive; }, [cameraActive]);
+  useEffect(() => { lastFrameRef.current = lastFrame; }, [lastFrame]);
+  useEffect(() => { connectedRef.current = connected; }, [connected]);
+
+  // ── Device enumeration: request permission first so labels are visible ──────
+  useEffect(() => {
+    navigator.mediaDevices?.getUserMedia({ audio: true })
+      .then((stream) => {
+        stream.getTracks().forEach((t) => t.stop());
+        return navigator.mediaDevices.enumerateDevices();
+      })
+      .then((devices) =>
+        setCommentaryDevices(devices.filter((d) => d.kind === "audioinput"))
+      )
+      .catch(() => {
+        navigator.mediaDevices
+          ?.enumerateDevices()
+          .then((devices) =>
+            setCommentaryDevices(devices.filter((d) => d.kind === "audioinput"))
+          );
+      });
+  }, []);
+
+  // ── Continuous frame streaming ───────────────────────────────────────────────
   useEffect(() => {
     if (cameraActive && connected) {
       frameIntervalRef.current = setInterval(() => {
@@ -88,12 +114,7 @@ export default function App() {
     return () => clearInterval(frameIntervalRef.current);
   }, [cameraActive, connected]);
 
-  // Auto-scroll chat
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  // Connect WebSocket
+  // ── WebSocket ────────────────────────────────────────────────────────────────
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
@@ -102,61 +123,32 @@ export default function App() {
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-
       switch (data.type) {
         case "connected":
           setConnected(true);
           break;
-
         case "audio":
           setCoachSpeaking(true);
           playAudioChunk(data.data);
           break;
-
-        case "transcript":
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last && last.role === "coach" && !last.complete) {
-              return [
-                ...prev.slice(0, -1),
-                { ...last, text: last.text + data.text },
-              ];
-            }
-            return [...prev, { role: "coach", text: data.text, complete: false }];
-          });
-          break;
-
         case "turn_complete":
           setCoachSpeaking(false);
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last && last.role === "coach") {
-              return [...prev.slice(0, -1), { ...last, complete: true }];
-            }
-            return prev;
-          });
           break;
-
         case "interrupted":
           setCoachSpeaking(false);
           stopAudioPlayback();
           break;
-
         case "error":
           console.error("[ERROR]", data.message);
           break;
       }
     };
 
-    ws.onclose = () => {
-      setConnected(false);
-      console.log("[WS] Disconnected");
-    };
-
+    ws.onclose = () => { setConnected(false); console.log("[WS] Disconnected"); };
     return () => ws.close();
   }, []);
 
-  // Camera toggle
+  // ── Camera ───────────────────────────────────────────────────────────────────
   const toggleCamera = useCallback(async () => {
     if (cameraActive) {
       streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -164,7 +156,6 @@ export default function App() {
       setLastFrame(null);
       return;
     }
-
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment", width: 640, height: 480 },
@@ -177,161 +168,206 @@ export default function App() {
     }
   }, [cameraActive]);
 
-  // Capture current camera frame
   const captureFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current) return null;
-    const video = videoRef.current;
     const canvas = canvasRef.current;
     canvas.width = 640;
     canvas.height = 480;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(video, 0, 0, 640, 480);
+    canvas.getContext("2d").drawImage(videoRef.current, 0, 0, 640, 480);
     const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
-    const base64 = dataUrl.split(",")[1];
     setLastFrame(dataUrl);
-    return base64;
+    return dataUrl.split(",")[1];
   }, []);
 
-  // Speech recognition toggle
-  const toggleListening = useCallback(() => {
-    console.log("[MIC] toggleListening called, listening =", listening);
+  // ── Send prompt ──────────────────────────────────────────────────────────────
+  const sendVoicePrompt = useCallback(
+    (text) => {
+      if (!text.trim() || !wsRef.current) return;
+      if (coachSpeakingRef.current) { stopAudioPlayback(); setCoachSpeaking(false); }
+      const frame = cameraActiveRef.current ? captureFrame() : null;
+      if (frame) {
+        wsRef.current.send(
+          JSON.stringify({ type: "text_with_image", text: text.trim(), image: frame, mime_type: "image/jpeg" })
+        );
+      } else {
+        wsRef.current.send(JSON.stringify({ type: "text", text: text.trim() }));
+      }
+    },
+    [captureFrame]
+  );
 
-    if (listening) {
-      recognitionRef.current?.stop();
-      return;
-    }
+  // ── Wake word listener ────────────────────────────────────────────────────────
+  const startWakeWordListener = useCallback(() => {
+    if (wakeWordRef.current) return;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR || !connectedRef.current) return;
 
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      alert("Speech recognition is not supported in this browser. Try Chrome or Edge.");
-      return;
-    }
+    const rec = new SR();
+    rec.continuous = true;
+    rec.interimResults = false;
+    rec.lang = "en-US";
 
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = "en-US";
+    rec.onresult = (event) => {
+      if (coachSpeakingRef.current) return;
+      const transcript = event.results[event.results.length - 1][0].transcript.trim();
+      const lower = transcript.toLowerCase();
 
-    recognition.onstart = () => {
-      setListening(true);
-      if (coachSpeaking) {
-        stopAudioPlayback();
-        setCoachSpeaking(false);
+      if (awaitingPromptRef.current) {
+        awaitingPromptRef.current = false;
+        setAwaitingPrompt(false);
+        sendVoicePrompt(transcript);
+        return;
+      }
+
+      if (lower.includes("hey coach")) {
+        const idx = lower.indexOf("hey coach");
+        const after = transcript.slice(idx + 9).replace(/^[\s,t]+/i, "").trim();
+        if (after.length > 2) sendVoicePrompt(after);
+        else { awaitingPromptRef.current = true; setAwaitingPrompt(true); }
       }
     };
 
-    recognition.onresult = (event) => {
+    rec.onend = () => {
+      wakeWordRef.current = null;
+      if (connectedRef.current && !coachSpeakingRef.current)
+        setTimeout(() => startWakeWordListener(), 300);
+    };
+
+    rec.onerror = (e) => {
+      if (e.error !== "no-speech") console.error("[WAKE] Error:", e.error);
+      wakeWordRef.current = null;
+    };
+
+    try { rec.start(); wakeWordRef.current = rec; } catch { wakeWordRef.current = null; }
+  }, [sendVoicePrompt]);
+
+  // Start wake word listener as soon as we're connected
+  useEffect(() => {
+    if (connected) startWakeWordListener();
+    else { wakeWordRef.current?.stop(); wakeWordRef.current = null; }
+  }, [connected, startWakeWordListener]);
+
+  // Restart wake word after coach finishes speaking
+  useEffect(() => {
+    if (!coachSpeaking) startWakeWordListener();
+  }, [coachSpeaking, startWakeWordListener]);
+
+  // ── Commentary ───────────────────────────────────────────────────────────────
+  const toggleCommentary = useCallback(async () => {
+    if (commentaryActive) {
+      commentaryRecorderRef.current?.stop();
+      commentaryStreamRef.current?.getTracks().forEach((t) => t.stop());
+      commentaryRecorderRef.current = null;
+      commentaryStreamRef.current = null;
+      wakeWordRef.current?.stop();
+      wakeWordRef.current = null;
+      commentaryActiveRef.current = false;
+      awaitingPromptRef.current = false;
+      setCommentaryActive(false);
+      setAwaitingPrompt(false);
+      return;
+    }
+
+    if (!selectedCommentaryDevice) {
+      alert("Select a commentary microphone first.");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: selectedCommentaryDevice } },
+      });
+      commentaryStreamRef.current = stream;
+
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+      const recorder = new MediaRecorder(stream, { mimeType });
+      commentaryRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size === 0 || coachSpeakingRef.current || !wsRef.current) return;
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64 = reader.result.split(",")[1];
+          wsRef.current?.send(
+            JSON.stringify({ type: "commentary_chunk", data: base64, mime_type: e.data.type || mimeType })
+          );
+        };
+        reader.readAsDataURL(e.data);
+      };
+
+      recorder.start(5000);
+      commentaryActiveRef.current = true;
+      setCommentaryActive(true);
+      startWakeWordListener();
+    } catch (err) {
+      console.error("[COMMENTARY] Error:", err);
+      alert("Could not access the selected microphone.");
+    }
+  }, [commentaryActive, selectedCommentaryDevice, startWakeWordListener]);
+
+  // ── Mic button ───────────────────────────────────────────────────────────────
+  const toggleListening = useCallback(() => {
+    if (listening) { recognitionRef.current?.stop(); return; }
+
+    if (wakeWordRef.current) { wakeWordRef.current.stop(); wakeWordRef.current = null; }
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { alert("Speech recognition not supported. Use Chrome or Edge."); return; }
+
+    const rec = new SR();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = "en-US";
+
+    rec.onstart = () => {
+      setListening(true);
+      if (coachSpeakingRef.current) { stopAudioPlayback(); setCoachSpeaking(false); }
+    };
+
+    rec.onresult = (event) => {
       let transcript = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
+      for (let i = event.resultIndex; i < event.results.length; i++)
         transcript += event.results[i][0].transcript;
-      }
       setInput(transcript);
 
       if (event.results[event.results.length - 1].isFinal) {
         const text = transcript.trim();
-        if (!text || !wsRef.current) return;
-
+        if (!text) return;
         setInput("");
-        recognition.stop();
-
-        if (coachSpeaking) {
-          stopAudioPlayback();
-          setCoachSpeaking(false);
-        }
-
-        let frame = null;
-        if (cameraActive) {
-          frame = captureFrame();
-        }
-
-        setMessages((prev) => [
-          ...prev,
-          { role: "user", text, image: frame ? lastFrame : null },
-        ]);
-
-        if (frame) {
-          wsRef.current.send(
-            JSON.stringify({
-              type: "text_with_image",
-              text,
-              image: frame,
-              mime_type: "image/jpeg",
-            })
-          );
-        } else {
-          wsRef.current.send(JSON.stringify({ type: "text", text }));
-        }
+        rec.stop();
+        sendVoicePrompt(text);
       }
     };
 
-    recognition.onend = () => setListening(false);
+    rec.onend = () => {
+      setListening(false);
+      startWakeWordListener();
+    };
 
-    recognition.onerror = (e) => {
+    rec.onerror = (e) => {
       console.error("[MIC] Error:", e.error);
-      if (e.error === "not-allowed") {
-        alert("Microphone permission denied. Please allow mic access and try again.");
-      } else if (e.error === "network") {
-        alert("Speech recognition network error. Check your internet connection.");
-      }
+      if (e.error === "not-allowed") alert("Microphone permission denied.");
       setListening(false);
     };
 
-    recognitionRef.current = recognition;
-    try {
-      recognition.start();
-    } catch (err) {
-      console.error("[MIC] Failed to start:", err);
-      setListening(false);
-    }
-  }, [listening, coachSpeaking, cameraActive, captureFrame, lastFrame]);
+    recognitionRef.current = rec;
+    try { rec.start(); } catch (err) { console.error("[MIC] Failed:", err); setListening(false); }
+  }, [listening, sendVoicePrompt, startWakeWordListener]);
 
-  // Send message
-  const sendMessage = useCallback(() => {
-    if (!input.trim() || !wsRef.current) return;
+  // ── Derive UI state label ─────────────────────────────────────────────────────
+  const stateLabel = !connected
+    ? "Connecting…"
+    : coachSpeaking
+    ? "Coach T is speaking"
+    : listening
+    ? "Listening…"
+    : awaitingPrompt
+    ? "Say your question…"
+    : 'Say "Hey Coach" or tap';
 
-    const text = input.trim();
-    setInput("");
-
-    // Stop coach if speaking
-    if (coachSpeaking) {
-      stopAudioPlayback();
-      setCoachSpeaking(false);
-    }
-
-    // Capture frame if camera is active
-    let frame = null;
-    if (cameraActive) {
-      frame = captureFrame();
-    }
-
-    // Add user message to chat
-    setMessages((prev) => [
-      ...prev,
-      { role: "user", text, image: frame ? lastFrame : null },
-    ]);
-
-    // Send to backend
-    if (frame) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: "text_with_image",
-          text,
-          image: frame,
-          mime_type: "image/jpeg",
-        })
-      );
-    } else {
-      wsRef.current.send(JSON.stringify({ type: "text", text }));
-    }
-  }, [input, cameraActive, coachSpeaking, captureFrame, lastFrame]);
-
-  const handleKeyDown = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-  };
+  const orbState = listening ? "listening" : coachSpeaking ? "speaking" : "idle";
 
   return (
     <div className="app">
@@ -350,11 +386,9 @@ export default function App() {
       </header>
 
       <div className="main">
-        {/* Video panel */}
+        {/* ── Video panel ── */}
         <div className="video-panel">
-          {cameraActive && connected && (
-            <div className="streaming-badge">LIVE</div>
-          )}
+          {cameraActive && connected && <div className="streaming-badge">LIVE</div>}
           <video
             ref={videoRef}
             autoPlay
@@ -369,108 +403,71 @@ export default function App() {
             </div>
           )}
           <canvas ref={canvasRef} style={{ display: "none" }} />
-          <button
-            className={`camera-btn ${cameraActive ? "active" : ""}`}
-            onClick={toggleCamera}
-          >
-            {cameraActive ? "📷 Camera On" : "📷 Enable Camera"}
-          </button>
+
+          <div className="video-panel-controls">
+            <button
+              className={`camera-btn ${cameraActive ? "active" : ""}`}
+              onClick={toggleCamera}
+            >
+              {cameraActive ? "📷 Camera On" : "📷 Enable Camera"}
+            </button>
+            <div className="commentary-controls">
+              <select
+                className="device-select"
+                value={selectedCommentaryDevice}
+                onChange={(e) => setSelectedCommentaryDevice(e.target.value)}
+                disabled={commentaryActive}
+              >
+                <option value="">Commentary mic…</option>
+                {commentaryDevices.map((d) => (
+                  <option key={d.deviceId} value={d.deviceId}>
+                    {d.label || `Mic (${d.deviceId.slice(0, 6)})`}
+                  </option>
+                ))}
+              </select>
+              <button
+                className={`commentary-btn ${commentaryActive ? "active" : ""}`}
+                onClick={toggleCommentary}
+                disabled={!connected}
+              >
+                {commentaryActive ? "🔊 On" : "🔊 Off"}
+              </button>
+            </div>
+          </div>
         </div>
 
-        {/* Chat panel */}
-        <div className="chat-panel">
-          <div className="messages">
-            {messages.length === 0 && (
-              <div className="welcome">
-                <div className="welcome-icon">🏆</div>
-                <h2>Coach T</h2>
-                <p className="welcome-desc">
-                  Your AI football tactical analyst. Ask about formations, pressing triggers, or point the camera at a match.
-                </p>
-                <div className="suggestions">
-                  <button onClick={() => setInput("What formation beats a 4-3-3?")}>
-                    ⚽ What beats a 4-3-3?
-                  </button>
-                  <button onClick={() => setInput("Explain gegenpressing to me")}>
-                    🔄 Explain gegenpressing
-                  </button>
-                  <button onClick={() => setInput("How do I break a low block?")}>
-                    🎯 Breaking a low block
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {messages.map((msg, i) => (
-              <div key={i} className={`message ${msg.role}`}>
-                <div className="message-avatar">
-                  {msg.role === "coach" ? "T" : "U"}
-                </div>
-                <div className="message-content">
-                  {msg.image && (
-                    <img src={msg.image} alt="Match frame" className="msg-image" />
-                  )}
-                  <div className="message-bubble">{msg.text}</div>
-                </div>
-              </div>
-            ))}
-
+        {/* ── Voice panel ── */}
+        <div className="voice-panel">
+          {/* Waveform visualizer — shown when coach speaks */}
+          <div className="vis-area">
             {coachSpeaking && (
-              <div className="message coach">
-                <div className="message-avatar">T</div>
-                <div className="message-content">
-                  <div className="message-bubble speaking-bubble">
-                    <div className="speaking-indicator">
-                      <span></span><span></span><span></span>
-                    </div>
-                  </div>
-                </div>
+              <div className="voice-waveform">
+                <span /><span /><span /><span /><span /><span /><span />
               </div>
             )}
-
-            <div ref={messagesEndRef} />
           </div>
 
-          {coachSpeaking && (
-            <div className="coach-speaking-bar">
-              <div className="speaking-waves">
-                <span /><span /><span /><span /><span />
-              </div>
-              Coach T is speaking…
-            </div>
-          )}
-
-          <div className="input-area">
+          {/* Central orb */}
+          <div className={`orb-wrap ${orbState}`}>
+            <div className="orb-ring ring-1" />
+            <div className="orb-ring ring-2" />
+            <div className="orb-ring ring-3" />
             <button
-              className={`mic-btn ${listening ? "active" : ""}`}
+              className={`voice-orb ${orbState}`}
               onClick={toggleListening}
               disabled={!connected}
+              aria-label={listening ? "Stop listening" : "Start speaking"}
             >
-              {listening ? "🔴" : "🎙️"}
+              <span className="orb-icon">{listening ? "■" : "🎙️"}</span>
             </button>
-            <div className={`input-wrap ${listening ? "listening" : ""}`}>
-              <input
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={
-                  listening
-                    ? "Listening…"
-                    : connected
-                    ? "Ask Coach T about tactics…"
-                    : "Connecting…"
-                }
-                disabled={!connected}
-              />
-            </div>
-            <button
-              className="send-btn"
-              onClick={sendMessage}
-              disabled={!connected || !input.trim()}
-            >
-              Send
-            </button>
+          </div>
+
+          {/* Status + interim transcript */}
+          <div className="voice-footer">
+            <p className={`voice-label ${orbState}`}>{stateLabel}</p>
+            {listening && input && (
+              <p className="interim-text">"{input}"</p>
+            )}
           </div>
         </div>
       </div>
