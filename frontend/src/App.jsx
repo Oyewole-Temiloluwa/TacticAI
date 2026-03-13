@@ -54,6 +54,7 @@ export default function App() {
   const [awaitingPrompt, setAwaitingPrompt] = useState(false);
 
   const wsRef = useRef(null);
+  const lingerTimerRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
@@ -133,10 +134,21 @@ export default function App() {
           break;
         case "turn_complete":
           setCoachSpeaking(false);
+          // 4-second follow-up window: any speech goes straight to Coach T
+          clearTimeout(lingerTimerRef.current);
+          awaitingPromptRef.current = true;
+          setAwaitingPrompt(true);
+          lingerTimerRef.current = setTimeout(() => {
+            awaitingPromptRef.current = false;
+            setAwaitingPrompt(false);
+          }, 4000);
           break;
         case "interrupted":
           setCoachSpeaking(false);
           stopAudioPlayback();
+          clearTimeout(lingerTimerRef.current);
+          awaitingPromptRef.current = false;
+          setAwaitingPrompt(false);
           break;
         case "error":
           console.error("[ERROR]", data.message);
@@ -364,7 +376,7 @@ export default function App() {
     : listening
     ? "Listening…"
     : awaitingPrompt
-    ? "Say your question…"
+    ? "Go ahead…"
     : 'Say "Hey Coach" or tap';
 
   const orbState = listening ? "listening" : coachSpeaking ? "speaking" : "idle";
