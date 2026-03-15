@@ -1,3 +1,10 @@
-venv/
-.env
-__pycache__/
+# Ignore everything
+*
+
+# Allow these specific directories and files
+!frontend/
+!backend/
+!README.md
+!.gitignore
+
+# Also ensure we ignore build artifacts and environment files within allowed folders if needed
