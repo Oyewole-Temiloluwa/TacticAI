@@ -3,8 +3,17 @@
 
 # Allow these specific directories and files
 !frontend/
+!frontend/**
 !backend/
+!backend/**
 !README.md
 !.gitignore
 
-# Also ensure we ignore build artifacts and environment files within allowed folders if needed
+# Re-ignore common artifacts inside allowed folders
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.env
+**/*.env
+**/node_modules/
+**/.DS_Store
